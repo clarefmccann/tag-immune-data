@@ -1,0 +1,309 @@
+---
+title: "exploring tag immune data"
+author: "cfm"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged
+    highlight: tango
+    theme: united
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  pdf_document:
+    toc: yes
+---
+
+### setting up markdown {.tabset}
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = TRUE,
+	warning = TRUE
+)
+
+options(scipen=999)
+```
+
+### loading required packages
+
+```{r load Required Packages, message=FALSE, warning=FALSE, include=FALSE}
+library(pacman)
+pacman::p_load(dplyr, lme4, nlme, readxl, ggplot2, tidyr, lubridate, psych, stringr, install = TRUE)
+```
+
+### setting root path
+
+```{r root path}
+
+cas_dir = "/Volumes/psych-cog/dsnlab/TAG/"
+proj_root = "/Volumes/psych-cog/dsnlab/TAG/projects/immune/"
+data_root = "/Volumes/psych-cog/dsnlab/TAG/data/Immune/"
+
+
+```
+
+### loading in data  
+
+```{r loading in data}
+
+# puberty
+# pds <- read.csv(paste0(cas_dir, "data/Questionnaires/Long/PDS_AllObs_Chronological.csv")) %>%
+#   mutate(tagid=as.factor(tagid),
+#          wave=as.factor(wave)) %>%
+#   select(tagid, wave, adrenf2, gonadf2, pdss) %>% 
+#   rename("adrenal_pdss" = "adrenf2",
+#          "gonadal_pdss" = "gonadf2")
+
+# age 
+age <- read.csv(paste0(cas_dir, "data/Demographics/allwaves_age_long_06.13.2025.csv")) %>% 
+  select(-X)
+
+# cleaned immune data 
+# w1_immune <- read.csv(paste0(data_root, "Wave1/TAG_W1_immune_cleaned.csv")) %>% 
+#   rename("tagid" = "id") %>% 
+#   select(-X) 
+# w1_immune$tagid <- sprintf("TAG%03d", w1_immune$tagid)
+# 
+# w3_immune <- read_excel(paste0(data_root, "Wave3/TAG_W3_immune_cleaned.xlsx"), sheet = 1) %>% 
+#   rename("tagid" = "id") %>% 
+#   select(-"...1", -"duration") 
+
+# sos_cytokines <- read.csv(paste0(cas_dir, "data/SOS/saliva/Cleaned_datasets/SOS_cytokines_cleaned.csv")) %>% 
+#   filter(Time == 1) %>% 
+#   rename("tagid" = "SampleID") %>%
+#   select(-X, -Well_Plate, -Time, -SampleID_Time)
+
+# r_sos_CRP <- read.csv(paste0(cas_dir, "data/SOS/saliva/Cleaned_datasets/SOS_CRP_cleaned.csv")) %>% 
+#   filter(Time == 1) %>% 
+#   rename("tagid" = "SampleID") %>% 
+#   mutate(wave = "SOS")
+
+### RAW CRP ###
+
+r_w1_CRP <- read.csv(paste0(data_root, "Wave1/TAG_W1_immune_cleaned.csv")) %>% 
+  rename("tagid" = "id") %>% 
+  select(tagid, crp_raw) %>% 
+  mutate(wave = "1")
+r_w1_CRP$tagid <- sprintf("TAG%03d", r_w1_CRP$tagid)
+
+r_w2_CRP <- read.csv(paste0(data_root, "Wave2/W2_raw_immune_data_NOT_CLEANED.csv")) %>% 
+    slice(-1) %>%
+  mutate(X = ifelse(X == "↓", NA, X)) %>%
+  fill(X) %>%
+  mutate(
+    tag = str_extract(X, "TAG-\\d+"),
+    date = str_extract(X, "\\d{1,2}[/–-]\\d{1,2}[/–-]\\d{2,4}") %>%
+             str_replace_all("–", "-"),
+    date = mdy(date),  
+    CRP = ifelse(grepl("<", CRP), "0.012", CRP),
+    CRP = as.numeric(CRP),
+    tagid = sprintf("TAG%03d", as.numeric(gsub("TAG-", "", tag)))
+  ) %>% 
+  select(tagid, date, CRP) %>% 
+  mutate(wave = "2") %>% 
+  group_by(tagid) %>% 
+  mutate(crp_raw = mean(CRP)) %>% 
+  ungroup() %>% 
+  select(tagid, wave, crp_raw) %>% 
+  unique()
+
+r_sos_CRP <- read.csv(paste0(cas_dir, "data/SOS/saliva/Cleaned_datasets/SOS_CRP_cleaned.csv")) %>% 
+  filter(Time == 1) %>% 
+  rename("tagid" = "SampleID",
+         "crp_raw" = "CRP_Ave") %>% 
+  select(tagid, crp_raw) %>% 
+  mutate(wave = "SOS")
+
+r_ace_CRP <- read_excel(paste0(data_root, "ACE/ACE Crp.xlsx"), sheet = 1, skip = 2) %>%
+  slice(-1) %>%
+  mutate(Sample = ifelse(Sample == "↓", NA, Sample)) %>%
+  fill(Sample) %>%
+  mutate(
+    tag = str_extract(Sample, "TAG_\\d+"),
+    date = str_extract(Sample, "\\d{1,2}[/–-]\\d{1,2}[/–-]\\d{2,4}") %>%
+             str_replace_all("–", "-"),
+    date = mdy(date),  
+    CRP = ifelse(grepl("<", CRP), "0.01", CRP),
+    CRP = as.numeric(CRP),
+    tagid = sprintf("TAG%03d", as.numeric(gsub("TAG_", "", tag)))
+  ) %>%
+  mutate(
+    date = if_else(tagid == "TAG106" & date == as.Date("2021-11-29"),
+                   as.Date("2020-11-29"),
+                   date)
+  ) %>%
+  select(tagid, date, CRP) %>%
+  mutate(
+    wave = if_else(date < ymd("2021-03-01"), "ACE2", "ACE3")
+  ) %>% 
+  group_by(tagid, wave) %>% 
+  mutate(crp_raw = mean(CRP)) %>% 
+  ungroup() %>% 
+  select(tagid, wave, crp_raw) %>% 
+  unique()
+
+r_w3_CRP <- read_excel(paste0(data_root, "Wave3/TAG_W3_immune_cleaned.xlsx"), sheet = 1) %>% 
+  rename("tagid" = "id") %>% 
+  select(tagid, crp_raw) %>% 
+  mutate(wave = "3")
+
+r_CRP <- rbind(r_w1_CRP, r_w2_CRP, r_sos_CRP, r_ace_CRP, r_w3_CRP)
+r_CRP <- left_join(r_CRP, age, by = c("tagid", "wave"))
+
+rm(r_w1_CRP, r_w2_CRP, r_sos_CRP, r_ace_CRP, r_w3_CRP, age)
+
+
+```
+
+```{r observations}
+
+obs_counts <- r_CRP %>%
+  group_by(tagid) %>%
+  summarise(n_obs = n_distinct(age)) %>%
+  arrange(desc(n_obs))
+
+table(obs_counts$n_obs)
+
+
+study_design <- r_CRP[order(r_CRP$age, r_CRP$tagid),]
+
+## creating levels using ordered doc
+
+study_design <- study_design %>%
+  mutate(Rank_nr=as.numeric(factor(tagid,levels=unique(tagid))))
+
+## creating visualization
+
+tag_study_design_plot<- ggplot(study_design,
+                           aes(x=age,
+                               y=Rank_nr,
+                               group=tagid)) +
+  geom_point(alpha=1) +
+  geom_line(alpha=.4) +
+  expand_limits(y=c(0,200))+
+  expand_limits(x=c(10,20)) +
+  theme(axis.text.y = element_blank()) +
+  ylab("") +
+  xlab("Age (years)")+
+  scale_y_discrete(breaks=NULL) +
+  theme_minimal()
+
+## viewing plot
+
+print(tag_study_design_plot)
+
+```
+
+
+```{r visualizing raw CRP trajectories}
+
+ raw_CRP_plot <- ggplot(data = r_CRP, aes(x = age, y = crp_raw)) +
+   # geom_point(aes(y = fit_vals), size = 1, shape = 16) +
+   geom_line(aes(group = tagid), color = "#88CCEE", size = 0.2, alpha = 1) +
+   stat_smooth(method = "loess", se = TRUE, color = "#FE5D9F", size = 1.2) +
+   labs(
+     x = "age (years)",
+     y = "raw CRP"
+   ) +
+  ylim(0,10) +
+   theme_minimal() +
+   theme(
+     legend.position = "none",
+     text = element_text(family = "Times", color = "black", size = 22),
+     axis.text = element_text(color = "black", size = 20),
+     axis.title.x = element_text(margin = margin(t = 10)),
+     axis.title.y = element_text(margin = margin(r = 10))
+   )
+
+print(raw_CRP_plot)
+
+
+```
+
+```{r pubertal hormones}
+
+######## HORMONES #############
+be_w1w2_hormones <- read.csv(paste0(cas_dir, "behavior/Puberty/Saliva/TAG_W1W2_Saliva_basalestimates.csv")) %>% 
+  pivot_longer(2:3, names_to = "hormone_w1", values_to = "level_w1") %>% 
+  pivot_longer(9:11, names_to = "hormone_w2", values_to = "level_w2") %>% 
+  select(SID, hormone_w1, level_w1, hormone_w2, level_w2) %>% 
+  separate(hormone_w1, into = c("hormone_w1", "wave_w1"), sep = "_(?=wave)") %>%
+  separate(hormone_w2, into = c("hormone_w2", "wave_w2"), sep = "_(?=wave)") %>% 
+  pivot_longer(
+    cols = c(hormone_w1, wave_w1, level_w1, hormone_w2, wave_w2, level_w2),
+    names_to = c(".value", "timepoint"),
+    names_pattern = "(.*)_(w[12])"
+  ) %>% 
+  distinct() %>% 
+  select(SID, wave, hormone, level) %>% 
+  mutate(SID = sprintf("TAG_%03d", SID),
+         hormone = ifelse(hormone == "TESTmean", "testosterone_mean",
+                          ifelse(hormone == "ESTmean", "estradiol_mean",
+                                 ifelse(hormone == "DHEAmean", "DHEA_mean",
+                                 hormone)))) %>% 
+  rename("tagid" = "SID")
+
+be_w3_hormones <- read.csv(paste0("/Volumes/psych-cog/dsnlab/cjm/hormones_wm/hormone_cleaning/W3_basal_estimates_flux.csv")) %>% 
+  pivot_longer(2:4, names_to = "hormone", values_to = "level") %>% 
+  select(tagid, hormone, level) %>% 
+  mutate(wave = "wave3")
+
+be_w4_hormones <- read.csv(paste0("/Volumes/psych-cog/dsnlab/cjm/hormones_wm/hormone_cleaning/W4_basal_estimates_flux.csv")) %>% 
+  pivot_longer(2:4, names_to = "hormone", values_to = "level") %>% 
+  select(tagid, hormone, level) %>% 
+  mutate(wave = "wave4")
+
+be_w5_hormones <- read.csv(paste0("/Volumes/psych-cog/dsnlab/cjm/hormones_wm/hormone_cleaning/W5_basal_estimates_flux.csv")) %>% 
+  pivot_longer(2:4, names_to = "hormone", values_to = "level") %>% 
+  select(tagid, hormone, level) %>% 
+  mutate(wave = "wave5")
+
+#c_sos_hormones <- read.csv(paste0(cas_dir, "behavior/SOS/saliva/Cleaned_datasets/SOS_hormones_cleaned.csv"))
+
+be_hormones <- full_join(be_w1w2_hormones, full_join(be_w3_hormones, full_join(be_w4_hormones, be_w5_hormones)))
+
+age <- age %>% 
+  mutate(
+    tagid = sub("^(TAG)(\\d+)", "TAG_\\2", tagid),
+    wave = ifelse(wave == 1, "wave1",
+           ifelse(wave == 2, "wave2",
+           ifelse(wave == 3, "wave3",
+           ifelse(wave == 4, "wave4",
+           ifelse(wave == 5, "wave5", wave)))))
+  )
+
+pds <- pds %>% 
+  mutate(
+    tagid = sub("^(TAG)(\\d+)", "TAG_\\2", tagid),
+    wave = ifelse(wave == 1, "wave1",
+           ifelse(wave == 2, "wave2",
+           ifelse(wave == 3, "wave3",
+           ifelse(wave == 4, "wave4",
+           ifelse(wave == 5, "wave5", wave)))))
+  )
+
+be_hormones <- left_join(be_hormones, age, by = c("tagid", "wave"))
+be_hormones <- left_join(be_hormones, pds, by = c("tagid", "wave"))
+
+```
+
+```{r visualizing pubertal hormone trajectories}
+
+be_hormones$wave <- factor(be_hormones$wave, levels = paste0("wave", 1:5)) 
+
+ggplot(be_hormones, aes(x = pdss, y = level, group = tagid, color = tagid)) +
+  geom_line(alpha = 0.6) +
+  geom_point(size = 1.5) +
+  geom_smooth(aes(group = 1), color = "black", se = FALSE, method = "loess", size = 1.2) +
+  facet_wrap(~ hormone) +
+  labs(title = "hormone trajectories",
+       x = "pds",
+       y = "levels (means)") +
+  theme_minimal() +
+  theme(legend.position = "none") 
+
+```

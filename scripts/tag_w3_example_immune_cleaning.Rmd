@@ -1,0 +1,458 @@
+---
+title: "cleaning TAG w2 immune data"
+author: "cfm"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged
+    highlight: tango
+    theme: united
+    toc: yes
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+  pdf_document:
+    toc: yes
+---
+
+
+### setting up markdown {.tabset}
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = TRUE,
+	warning = TRUE
+)
+
+options(scipen=999)
+```
+
+### loading required packages
+
+```{r load Required Packages, message=FALSE, warning=FALSE, include=FALSE}
+library(pacman)
+pacman::p_load(dplyr, lme4, nlme, readxl, ggplot2, tidyr, lubridate, psych, stringr, e1071, install = TRUE)
+```
+
+### setting root path
+
+```{r root path}
+
+cas_dir = "/Volumes/psych-cog/dsnlab/TAG/"
+proj_root = "/Volumes/psych-cog/dsnlab/TAG/projects/immune/"
+data_root = "/Volumes/psych-cog/dsnlab/TAG/data/Immune/"
+
+
+```
+
+# Creating intraassay CSV 
+## manually copied over raw concentrations from each "Human CRP saliva plate #.csv" into one CSV
+
+## This example is for multiplex assays of: salivary CRP(panel 1), IL-10, IL-6, TNFa (panel 2), and secretory IgA (panel 3) from Wave 3 of the University of Oregon TAG Study for a substudy K01MH111951 (michelle.byrne@gmail.com)
+
+**FROM ORIGINAL SCRIPT**: Calculate intra-assay CVs (from MFI, not concentration) from the sample (duplicate) CVs. Note that the duplicate sample %CVs reported in the masterfile from the lab ARE calculated from the MFI. Also, the units are PERCENTAGES even though these are not indicated (so if the value is 5.39, that is 5.39%, or 0.0539, not 539%).
+
+*NOTE*: Looking back at previous excel spreadsheets that calculated the intraassays, we do use the raw concentrations. 
+
+```{r creating intraassay CSV}
+
+cleaned_intra <- read.csv(paste0(data_root, "Wave2/W2_raw_immune_data_NOT_CLEANED.csv")) %>%
+  mutate(tagid = na_if(tagid, "↓")) %>%
+  fill(tagid) %>%
+  mutate(across(c(CRP, IFNg, il10, il4, il6, tnf_alpha, IgA),
+                ~ ifelse(grepl("^[<>]", .), NA, as.numeric(.)),
+                .names = "num_{.col}")) %>%
+  group_by(tagid) %>%
+  summarise(
+    across(starts_with("num_"),
+           list(mean = ~mean(., na.rm = TRUE),
+                sd = ~sd(., na.rm = TRUE)),
+           .names = "{.col}_{.fn}"),
+    plate = first(plate)
+  ) %>%
+  mutate(
+    across(ends_with("_sd"), 
+           ~ . / get(sub("_sd$", "_mean", cur_column())) * 100,
+           .names = "{sub('_sd$', '_cv', .col)}")
+  ) %>%
+  ungroup()
+
+write.csv(cleaned_intra, file = paste0(data_root, "Wave2/script_output/TAG_W2_immune_intraassays_ids.csv"))
+
+
+intra_plate_avgs <- cleaned_intra %>%
+  group_by(plate) %>%
+  summarise(cv_crp = mean(num_CRP_cv, na.rm = TRUE),
+            cv_IFNg = mean(num_IFNg_cv, na.rm = TRUE),
+            cv_il10 = mean(num_il10_cv, na.rm = TRUE),
+            cv_il4 = mean(num_il4_cv, na.rm = TRUE),
+            cv_il6 = mean(num_il6_cv, na.rm = TRUE),
+            cv_tnfalpha = mean(num_tnf_alpha_cv, na.rm = TRUE),
+            cv_IgA = mean(num_IgA_cv, na.rm = TRUE))
+
+write.csv(intra_plate_avgs, file = paste0(data_root, "Wave2/script_output/TAG_W2_immune_intraassay_plate_CVs.csv"))
+
+
+intra_cvs <- intra_plate_avgs %>%
+  summarise(cv_crp = mean(as.numeric(cv_crp), na.rm = TRUE),
+            cv_IFNg = mean(as.numeric(cv_IFNg), na.rm = TRUE),
+            cv_il10 = mean(as.numeric(cv_il10), na.rm = TRUE),
+            cv_il4 = mean(as.numeric(cv_il4), na.rm = TRUE),
+            cv_il6 = mean(as.numeric(cv_il6), na.rm = TRUE),
+            cv_tnfalpha = mean(as.numeric(cv_tnfalpha), na.rm = TRUE),
+            cv_IgA = mean(as.numeric(cv_IgA), na.rm = TRUE))
+
+write.csv(intra_cvs, file = paste0(data_root, "Wave2/script_output/TAG_W2_immune_intraassay_CVs_avg"))
+
+print(intra_plate_avgs)
+print(intra_cvs)
+
+```
+
+# Steps for cleaning, tidying, and reporting on inflammatory markers.
+
+**FROM ORIGINAL SCRIPT**: Calculate inter-assay CVs (from MFI, not concentration) from the high and low controls. Note: there are 5 plates but controls were reused for plates 4 & 5 (so only 3 plates for inter-assays) in WAVE 1 *note need to check for w3, in w2 the plates do not use the same controls
+
+*NOTE*: using result, not MFI per previous wave's calculations; ASK ABOUT INVALID CONTROLS.. in previous waves, seems like we still used the value
+
+```{r inter_cvs}
+
+controls <- read.csv(paste0(data_root, "Wave2/TAG_W2_immune_highlowcontrols.csv")) %>% 
+  mutate(
+    high_num = ifelse(grepl("^[<>]", high), NA, as.numeric(high)),
+    low_num  = ifelse(grepl("^[<>]", low), NA, as.numeric(low))
+  )
+
+print(controls)
+
+## means within plates within markers
+
+inter_plate_avgs <- controls %>%
+  group_by(marker, plate) %>%
+  summarise(
+    high_mean = mean(high_num, na.rm = TRUE),
+    low_mean = mean(low_num, na.rm = TRUE),
+    .groups = "drop"
+  )
+  
+inter_cvs <- inter_plate_avgs %>%
+  group_by(marker) %>%
+  summarise(
+    high_cv = (sd(high_mean, na.rm = TRUE) / mean(high_mean, na.rm = TRUE)) * 100,
+    low_cv = (sd(low_mean, na.rm = TRUE) / mean(low_mean, na.rm = TRUE)) * 100,
+    inter_cv = mean(c(high_cv, low_cv), na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print(inter_cvs)
+
+write.csv(inter_cvs, file = paste0(data_root, "Wave2/script_output/TAG_W2_immune_intercvs.csv"))
+
+```
+
+Load data and deal with out of range values (too high or low for assay to detect). 
+IMPORTANT: CRP and SIgA Concentrations are in ng/ml. ALL OTHERS are in pg/ml.
+We change right censored to max of distribution plus increment (i.e., sensitivity units of the assay) and left censored to lower limit of detection of that assay minus increment:
+- in pg/ml, IFN-ɣ: 2.9; IL-10: 1.1; IL-12p70: 0.6; IL-2: 1.0; IL-4: 4.5; IL-6: 0.9; TNF-ɑ: 0.7
+- in ng/ml: CRP: 0.001; SIgA: 0.40
+
+**FROM ORIGINAL W1 SCRIPT**: Completely missing samples (i.e., no sample was given or nothing could be assayed) will be imputed after this cleaning process.
+
+
+```{r}
+
+raw_immune <- read.csv(paste0(data_root, "Wave2/W2_raw_immune_data_NOT_CLEANED.csv")) %>%
+  mutate(tagid = na_if(tagid, "↓")) %>%
+  fill(tagid) %>%
+  mutate(across(c(CRP, IFNg, il10, il4, il6, tnf_alpha, IgA),
+                ~ case_when(
+                    grepl("^<", .) ~ "OOR<",
+                    grepl("^>", .) ~ "OOR>",
+                    TRUE ~ .
+                  ))) %>%
+  mutate(across(c(CRP, IFNg, il10, il4, il6, tnf_alpha, IgA),
+                ~ ifelse(grepl("^(OOR<|OOR>)", .), NA, as.numeric(.)),
+                .names = "num_{.col}"))
+
+oor_counts <- raw_immune %>%
+  summarise(across(c(CRP, IFNg, il10, il4, il6, tnf_alpha, IgA),
+                   list(
+                     oor_left = ~sum(grepl("^OOR<", .), na.rm = TRUE),
+                     oor_right = ~sum(grepl("^OOR>", .), na.rm = TRUE)
+                   ),
+                   .names = "{.col}_{.fn}"))
+
+print(oor_counts)
+
+marker_max <- raw_immune %>%
+  summarise(across(starts_with("num_"),
+                   ~ max(., na.rm = TRUE),
+                   .names = "{.col}_max"))
+
+default_increment <- 0.01
+crp_increment <- 0.0001
+
+min_crp = 0.001/2
+min_il10 = 1.1/2
+min_il6 = 0.9/2
+min_tnfa = 0.7/2
+min_iga = 0.40/2
+min_ifng = 2.9/2
+min_il4 = 4.5/2
+
+raw_immune <- raw_immune %>%
+  mutate(
+    CRP = ifelse(CRP == "OOR>", marker_max$num_CRP_max + crp_increment, CRP),
+    IFNg = ifelse(IFNg == "OOR>", marker_max$num_IFNg_max + default_increment, IFNg),
+    il10 = ifelse(il10 == "OOR>", marker_max$num_il10_max + default_increment, il10),
+    il4 = ifelse(il4 == "OOR>", marker_max$num_il4_max + default_increment, il4),
+    il6 = ifelse(il6 == "OOR>", marker_max$num_il6_max + default_increment, il6),
+    tnf_alpha = ifelse(tnf_alpha == "OOR>", marker_max$num_tnf_alpha_max + default_increment, tnf_alpha),
+    IgA = ifelse(IgA == "OOR>", marker_max$num_IgA_max + default_increment, IgA)
+  ) %>% 
+  mutate(
+    CRP = ifelse(CRP == "OOR<", min_crp - crp_increment, CRP),
+    IFNg = ifelse(IFNg == "OOR<", min_ifng - default_increment, IFNg),
+    il10 = ifelse(il10 == "OOR<", min_il10 - default_increment, il10),
+    il4 = ifelse(il4 == "OOR<", min_il4 - default_increment, il4),
+    il6 = ifelse(il6 == "OOR<", min_il6 - default_increment, il6),
+    tnf_alpha = ifelse(tnf_alpha == "OOR<", min_tnfa - default_increment, tnf_alpha),
+    IgA = ifelse(IgA == "OOR<", min_iga - default_increment, IgA)
+  ) %>% 
+  mutate(across(c(CRP, IFNg, il10, il4, il6, tnf_alpha, IgA), as.numeric)) %>%
+  separate(tagid, into = c("tagid", "sample_date"), sep = " (?=\\d{1,2}-\\d{1,2}-\\d{2})") %>% 
+  mutate(tagid = gsub("-", "_", tagid)) %>% 
+  select(-starts_with("num_"), -sample_date) %>% 
+  group_by(tagid) %>% 
+    summarise(
+    win_IgA = mean(IgA, na.rm = TRUE),
+    win_CRP = mean(CRP, na.rm = TRUE),
+    win_IFNg = mean(IFNg, na.rm = TRUE),
+    win_il10 = mean(il10, na.rm = TRUE),
+    win_il4 = mean(il4, na.rm = TRUE),
+    win_il6 = mean(il6, na.rm = TRUE),
+    win_tnf_alpha = mean(tnf_alpha, na.rm = TRUE),
+    .groups = "drop"
+  )
+  
+write.csv(raw_immune, file = paste0(data_root, "Wave2/script_output/TAG_W2_immune_winsorized.csv"))
+
+```
+
+Correct your data for flow rate
+#### Flow rate = *(Volume of saliva)/(time sample took in sec)*
+#### Corrected concentration = *(observed concentration) x (Flow rate)*
+##### CRP is *not* flow rate dependent
+##### SIgA *is* flow rate dependent
+##### For all the other markers, there is no evidence (yet) that it is flow rate dependent but not really any work done to investigate this. Will only correct for SIgA for now.
+
+```{r}
+
+covariates <- read.csv(paste0(data_root, "Wave2/TAG_W2_immune_covariates.csv"))
+vol_ml = 1.5
+
+full <- left_join(raw_immune, covariates, by = "tagid") %>% 
+    mutate(
+    minutes = floor(immune_time_to_collect),
+    seconds = (immune_time_to_collect - minutes) * 100,
+    duration = (minutes * 60) + seconds,
+    flowrate = 1.5 / duration,
+    win_IgA_fr_corrected = win_IgA * flowrate
+  ) %>% 
+  select(-win_IgA)
+
+```
+
+### CFM - STOPPED HERE !! 
+Check normality, outliers, and skew stats in the raw concentrations
+```{r check_norm}
+
+full_long <- full %>%
+  pivot_longer(
+    cols = starts_with("win_"),
+    names_to = "marker",
+    values_to = "value"
+  )
+
+ggplot(full_long, aes(x = value)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  facet_wrap(~ marker, scales = "free") +
+  labs(title = "winsorized", x = "marker", y = "value") +
+  theme_minimal()
+
+ggplot(full_long, aes(x = marker, y = value)) +
+  geom_boxplot(fill = "tomato", outlier.shape = 21) +
+  labs(title = "winsorized", x = "marker", y = "value") +
+  theme_minimal()
+
+normality_stats <- full_long %>%
+  group_by(marker) %>%
+  summarise(
+    skewness = skewness(value, na.rm = TRUE),
+    kurtosis = kurtosis(value, na.rm = TRUE),
+    requires_log = abs(skewness) > 2 | abs(kurtosis) > 2,
+    .groups = "drop"
+  )
+
+full_long <- full_long %>%
+  left_join(normality_stats %>% select(marker, requires_log), by = "marker") %>%
+  mutate(
+    value_ln = ifelse(requires_log, log(value), value)  
+  )
+
+log_normality_stats <- full_long %>%
+  group_by(marker) %>%
+  summarise(
+    log_skewness = skewness(value_ln, na.rm = TRUE),
+    log_kurtosis = kurtosis(value_ln, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+final_normality_stats <- normality_stats %>%
+  left_join(log_normality_stats, by = "marker") %>%
+  mutate(
+    log_skew_flag = ifelse(abs(log_skewness) > 2, "Outside [-2, 2]", "Acceptable"),
+    log_kurtosis_flag = ifelse(abs(log_kurtosis) > 2, "Outside [-2, 2]", "Acceptable")
+  )
+
+```
+
+Winsorize any remaining outliers that are +/- 3 SD (if any)
+
+```{r}
+lncrp_up_limit <- (final_lncrp_summary$mean + 3*(final_lncrp_summary$sd))
+lncrp_up_limit
+lncrp_lo_limit <- (final_lncrp_summary$mean - 3*(final_lncrp_summary$sd))
+lncrp_lo_limit
+
+lnil10_up_limit <- (final_lnil10_summary$mean + 3*(final_lnil10_summary$sd))
+lnil10_up_limit
+lnil10_lo_limit <- (final_lnil10_summary$mean - 3*(final_lnil10_summary$sd))
+lnil10_lo_limit
+
+lnil6_up_limit <- (final_lnil6_summary$mean + 3*(final_lnil6_summary$sd))
+lnil6_up_limit
+lnil6_lo_limit <- (final_lnil6_summary$mean - 3*(final_lnil6_summary$sd))
+lnil6_lo_limit
+
+lntnfa_up_limit <- (final_lntnfa_summary$mean + 3*(final_lntnfa_summary$sd))
+lntnfa_up_limit
+lntnfa_lo_limit <- (final_lntnfa_summary$mean - 3*(final_lntnfa_summary$sd))
+lntnfa_lo_limit
+
+lnsiga_up_limit <- (final_lnsiga_summary$mean + 3*(final_lnsiga_summary$sd))
+lnsiga_up_limit
+lnsiga_lo_limit <- (final_lnsiga_summary$mean - 3*(final_lnsiga_summary$sd))
+lnsiga_lo_limit
+
+
+tucrp_up_limit <- (final_tucrp_summary$mean + 3*(final_tucrp_summary$sd))
+tucrp_up_limit
+tucrp_lo_limit <- (final_tucrp_summary$mean - 3*(final_tucrp_summary$sd))
+tucrp_lo_limit
+
+tuil10_up_limit <- (final_tuil10_summary$mean + 3*(final_tuil10_summary$sd))
+tuil10_up_limit
+tuil10_lo_limit <- (final_tuil10_summary$mean - 3*(final_tuil10_summary$sd))
+tuil10_lo_limit
+
+tuil6_up_limit <- (final_tuil6_summary$mean + 3*(final_tuil6_summary$sd))
+tuil6_up_limit
+tuil6_lo_limit <- (final_tuil6_summary$mean - 3*(final_tuil6_summary$sd))
+tuil6_lo_limit
+
+tutnfa_up_limit <- (final_tutnfa_summary$mean + 3*(final_tutnfa_summary$sd))
+tutnfa_up_limit
+tutnfa_lo_limit <- (final_tutnfa_summary$mean - 3*(final_tutnfa_summary$sd))
+tutnfa_lo_limit
+
+tusiga_up_limit <- (final_tusiga_summary$mean + 3*(final_tusiga_summary$sd))
+tusiga_up_limit
+tusiga_lo_limit <- (final_tusiga_summary$mean - 3*(final_tusiga_summary$sd))
+tusiga_lo_limit
+
+# First check if there are any outliers (if not, no need to winsorize). Also, report these numbers. 
+lncrp_num_right_outliers <- length(na.omit(tag_w3_immune$ln_crp [tag_w3_immune$ln_crp > lncrp_up_limit])) 
+lncrp_num_right_outliers
+lncrp_num_left_outliers <- length(na.omit(tag_w3_immune$ln_crp [tag_w3_immune$ln_crp < lncrp_lo_limit]))
+lncrp_num_left_outliers
+
+lnil10_num_right_outliers <- length(na.omit(tag_w3_immune$ln_il10 [tag_w3_immune$ln_il10 > lnil10_up_limit])) 
+lnil10_num_right_outliers
+lnil10_num_left_outliers <- length(na.omit(tag_w3_immune$ln_il10 [tag_w3_immune$ln_il10 < lnil10_lo_limit])) 
+lnil10_num_left_outliers
+
+lnil6_num_right_outliers <- length(na.omit(tag_w3_immune$ln_il6 [tag_w3_immune$ln_il6 > lnil6_up_limit])) 
+lnil6_num_right_outliers
+lnil6_num_left_outliers <- length(na.omit(tag_w3_immune$ln_il6 [tag_w3_immune$ln_il6 < lnil6_lo_limit]))
+lnil6_num_left_outliers
+
+lntnfa_num_right_outliers <- length(na.omit(tag_w3_immune$ln_tnfa [tag_w3_immune$ln_tnfa > lntnfa_up_limit])) 
+lntnfa_num_right_outliers
+lntnfa_num_left_outliers <- length(na.omit(tag_w3_immune$ln_tnfa [tag_w3_immune$ln_tnfa < lntnfa_lo_limit])) 
+lntnfa_num_left_outliers 
+
+lnsiga_num_right_outliers <- length(na.omit(tag_w3_immune$ln_siga [tag_w3_immune$ln_siga > lnsiga_up_limit]))
+lnsiga_num_right_outliers 
+lnsiga_num_left_outliers <- length(na.omit(tag_w3_immune$ln_siga [tag_w3_immune$ln_siga < lnsiga_lo_limit]))
+lnsiga_num_left_outliers
+
+tucrp_num_right_outliers <- length(na.omit(tag_w3_immune$tu_crp [tag_w3_immune$tu_crp > tucrp_up_limit])) 
+tucrp_num_right_outliers
+tucrp_num_left_outliers <- length(na.omit(tag_w3_immune$tu_crp [tag_w3_immune$tu_crp < tucrp_lo_limit]))
+tucrp_num_left_outliers
+
+tuil10_num_right_outliers <- length(na.omit(tag_w3_immune$tu_il10 [tag_w3_immune$tu_il10 > tuil10_up_limit])) 
+tuil10_num_right_outliers
+tuil10_num_left_outliers <- length(na.omit(tag_w3_immune$tu_il10 [tag_w3_immune$tu_il10 < tuil10_lo_limit])) 
+tuil10_num_left_outliers
+
+tuil6_num_right_outliers <- length(na.omit(tag_w3_immune$tu_il6 [tag_w3_immune$tu_il6 > tuil6_up_limit])) 
+tuil6_num_right_outliers
+tuil6_num_left_outliers <- length(na.omit(tag_w3_immune$tu_il6 [tag_w3_immune$tu_il6 < tuil6_lo_limit]))
+tuil6_num_left_outliers
+
+tutnfa_num_right_outliers <- length(na.omit(tag_w3_immune$tu_tnfa [tag_w3_immune$tu_tnfa > tutnfa_up_limit])) 
+tutnfa_num_right_outliers
+tutnfa_num_left_outliers <- length(na.omit(tag_w3_immune$tu_tnfa [tag_w3_immune$tu_tnfa < tutnfa_lo_limit])) 
+tutnfa_num_left_outliers 
+
+tusiga_num_right_outliers <- length(na.omit(tag_w3_immune$tu_siga [tag_w3_immune$tu_siga > tusiga_up_limit]))
+tusiga_num_right_outliers 
+tusiga_num_left_outliers <- length(na.omit(tag_w3_immune$tu_siga [tag_w3_immune$tu_siga < tusiga_lo_limit]))
+tusiga_num_left_outliers
+```
+
+* Note: Update for W3. (From W1: In this data, tukey has 1 left outlier for IFN-g and 1 left outlier for IL-10. For ln, 6 right IFN-g, 1 left IL-10, 3 right IL-12, 2 right IL-4, 1 right TNF-a. Winsorize those.)
+```{r}
+library(DescTools)
+tag_w3_immune$ifng_tu_w <- Winsorize(tag_w3_immune$tu_ifng, minval = tuifng_lo_limit, maxval = tuifng_up_limit, na.rm = TRUE)
+tag_w3_immune$il10_tu_w <- Winsorize(tag_w3_immune$tu_il10, minval = tuil10_lo_limit, maxval = tuil10_up_limit, na.rm = TRUE)
+
+tag_w3_immune$ifng_ln_w <- Winsorize(tag_w3_immune$ln_ifng, minval = lnifng_lo_limit, maxval = lnifng_up_limit, na.rm = TRUE)
+tag_w3_immune$il10_ln_w <- Winsorize(tag_w3_immune$ln_il10, minval = lnil10_lo_limit, maxval = lnil10_up_limit, na.rm = TRUE)
+tag_w3_immune$il12_ln_w <- Winsorize(tag_w3_immune$ln_il12, minval = lnil12_lo_limit, maxval = lnil12_up_limit, na.rm = TRUE)
+tag_w3_immune$il4_ln_w <- Winsorize(tag_w3_immune$ln_il4, minval = lnil4_lo_limit, maxval = lnil4_up_limit, na.rm = TRUE)
+tag_w3_immune$tnfa_ln_w <- Winsorize(tag_w3_immune$ln_tnfa, minval = lntnfa_lo_limit, maxval = lntnfa_up_limit, na.rm = TRUE)
+```
+
+
+Output final cleaned data
+```{r}
+tag_w3_immune$crp_tu_cleaned <- tag_w3_immune$tu_crp
+tag_w3_immune$il10_tu_cleaned <- tag_w3_immune$il10_tu_w
+tag_w3_immune$il6_tu_cleaned <- tag_w3_immune$tu_il6
+tag_w3_immune$tnfa_tu_cleaned <- tag_w3_immune$tu_tnfa
+tag_w3_immune$siga_tu_cleaned <- tag_w3_immune$tu_siga
+
+tag_w3_immune$crp_ln_cleaned <- tag_w3_immune$ln_crp
+tag_w3_immune$il10_ln_cleaned <- tag_w3_immune$il10_ln_w
+tag_w3_immune$il6_ln_cleaned <- tag_w3_immune$ln_il6
+tag_w3_immune$tnfa_ln_cleaned <- tag_w3_immune$tnfa_ln_w
+tag_w3_immune$siga_ln_cleaned <- tag_w3_immune$ln_siga
+
+write.csv(tag_w3_immune, file="TAG_W3_immune_cleaned.csv")
+```
+
